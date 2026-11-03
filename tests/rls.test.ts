@@ -29,7 +29,9 @@ const q = (sql: string, params: unknown[] = []) => db.query<any>(sql, params);
 beforeAll(async () => {
   db = new PGlite();
   await db.exec(SUPABASE_STUB);
-  await db.exec(readFileSync(new URL("../supabase/migrations/0001_init.sql", import.meta.url), "utf8"));
+  for (const m of ["0001_init.sql", "0002_private_helpers.sql"]) {
+    await db.exec(readFileSync(new URL(`../supabase/migrations/${m}`, import.meta.url), "utf8"));
+  }
   await db.exec(`
     grant usage on schema public to anon, authenticated, service_role;
     grant all on all tables in schema public to authenticated, service_role;
@@ -99,6 +101,12 @@ describe("row level security", () => {
       expect((await q(`select * from allowed_emails`)).rows).toEqual([]);
       await expect(q(`insert into ai_usage (user_id, provider, feature) values ($1, 'anthropic', 'ask')`, [A])).rejects.toThrow(/row-level security/);
     });
+  });
+
+  it("RLS helpers aren't callable by anonymous users", async () => {
+    await db.exec("set role anon");
+    try { await expect(q("select private.is_allowed()")).rejects.toThrow(/permission denied/); }
+    finally { await db.exec("reset role"); }
   });
 
   it("prune_autosaves keeps the newest 15", async () => {

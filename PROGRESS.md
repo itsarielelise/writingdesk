@@ -2,7 +2,11 @@
 
 All six phases are implemented in code. What could not be done from the build environment is marked **owner**: it needs real accounts and keys.
 
-Test suite: `npm test`, 71 tests in 7 files, all passing. `npm run lint` (tsc) and `next build` are clean.
+Test suite: `npm test`, 72 tests in 7 files, all passing. `npm run lint` (tsc) and `next build` are clean.
+
+## Setup status
+- Supabase: both migrations applied to the project `idnwgpwlhmgkxnsbnuvi` (Inner Algo org) on 2026-11-03; `admin@inneralgo.com` seeded as admin. Supabase's security advisor is clean apart from the intended "no policies on allowed_emails" note.
+- Still to do: Google provider + redirect URLs in Supabase, Vercel project and env vars.
 
 ## 1. Scaffold and auth
 - Next.js 16 App Router + TypeScript. Supabase SSR helpers; session refresh in `src/proxy.ts` (Next 16's replacement for `middleware.ts`).

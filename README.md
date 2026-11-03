@@ -7,7 +7,7 @@ A distraction-aware writing app for a small, invite-only group of writers. It no
 
 ## Setup (one-time, outside the code)
 
-1. **Supabase.** Create a project. In *SQL Editor*, run [`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql) (or `supabase db push` with the CLI).
+1. **Supabase.** Create a project. In *SQL Editor*, run the files in [`supabase/migrations/`](supabase/migrations/) in order (or `supabase db push` with the CLI).
 2. **Google sign-in.** In Google Cloud Console create an OAuth client (*Web application*). Add the callback URL Supabase shows under *Authentication → Providers → Google* as an authorized redirect URI, then paste the client ID and secret into that Supabase page and enable the provider.
 3. **Redirect URLs.** In Supabase *Authentication → URL Configuration*, set *Site URL* to your app's URL and add `https://<your-app>/auth/callback` (and `http://localhost:3000/auth/callback` for local dev) to *Redirect URLs*.
 4. **Keys.** Get an Anthropic API key from the Claude Console. A TypeSafe API key is optional; without it the coach uses Claude Haiku.
