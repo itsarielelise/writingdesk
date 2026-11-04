@@ -1,0 +1,32 @@
+# Render Blueprint: New → Blueprint → pick this repo. Render creates the web
+# service from this file and asks you for the values marked `sync: false`.
+services:
+  - type: web
+    name: writing-desk
+    runtime: node
+    plan: free
+    region: oregon            # same area as the Supabase project (us-west-2)
+    branch: claude/kind-faraday-7q46xf
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NEXT_PUBLIC_SUPABASE_URL
+        value: https://idnwgpwlhmgkxnsbnuvi.supabase.co
+      - key: NEXT_PUBLIC_SUPABASE_ANON_KEY   # public by design; RLS protects the data
+        value: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlkbndncHdsaG1na3huc2JudXZpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM3MjQ1NzIsImV4cCI6MjEwOTMwMDU3Mn0.lLC2S9wX1FiVeAtzHFXXLEAk1tak0b0F3hg1JlStpVk
+      - key: ADMIN_EMAIL
+        value: admin@inneralgo.com
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: TYPESAFE_API_KEY
+        sync: false
+      - key: DAILY_LIMIT_JEV
+        value: "300"
+      - key: DAILY_LIMIT_STITCH
+        value: "3"
+      - key: DAILY_LIMIT_ASK
+        value: "60"

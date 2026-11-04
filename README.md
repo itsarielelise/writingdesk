@@ -11,7 +11,7 @@ A distraction-aware writing app for a small, invite-only group of writers. It no
 2. **Google sign-in.** In Google Cloud Console create an OAuth client (*Web application*). Add the callback URL Supabase shows under *Authentication → Providers → Google* as an authorized redirect URI, then paste the client ID and secret into that Supabase page and enable the provider.
 3. **Redirect URLs.** In Supabase *Authentication → URL Configuration*, set *Site URL* to your app's URL and add `https://<your-app>/auth/callback` (and `http://localhost:3000/auth/callback` for local dev) to *Redirect URLs*.
 4. **Keys.** Get an Anthropic API key from the Claude Console. A TypeSafe API key is optional; without it the coach uses Claude Haiku.
-5. **Vercel.** Create a project from this repo and add the environment variables from [`.env.example`](.env.example). Put your own address in `ADMIN_EMAIL`.
+5. **Hosting (Render).** In Render choose *New → Blueprint* and pick this repo. [`render.yaml`](render.yaml) sets up the service; Render asks for the secret keys. (Vercel or any Node host also works: add the variables from [`.env.example`](.env.example).)
 6. Sign in once with that address (it's seeded as admin on first sign-in), then invite the other writers from `/admin`.
 
 ## Local development
