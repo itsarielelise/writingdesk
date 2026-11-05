@@ -15,12 +15,14 @@ export const GET = route<P>("pieces.get", async ({ supabase, params }) => {
     supabase.from("paragraph_meta").select("pid,rev_count").eq("piece_id", id),
     supabase.from("notes").select("id,text,image_src,created_at,updated_at").eq("piece_id", id).order("created_at", { ascending: false }),
   ]);
-  for (const r of [piece, versions, parked, flags, meta, notes]) if (r.error) throw r.error;
+  for (const r of [piece, versions, parked, flags, meta]) if (r.error) throw r.error;
+  // Notes arrived in migration 0003; until it's applied, open pieces without them.
+  if (notes.error && !/notes|42P01|PGRST20/.test(`${notes.error.code} ${notes.error.message}`)) throw notes.error;
   if (!piece.data) throw new HttpError(404, "That piece couldn’t be found.");
   const p = { ...piece.data, content: sanitizeDoc(piece.data.content) };
   const vs = (versions.data || []).map((v) => ({ ...v, content: sanitizeDoc(v.content) }));
   return json({
-    piece: p, versions: vs, parked: parked.data, notes: notes.data, flags: flags.data,
+    piece: p, versions: vs, parked: parked.data, notes: notes.error ? [] : notes.data, flags: flags.data,
     meta: Object.fromEntries((meta.data || []).map((m) => [m.pid, m.rev_count])),
   });
 });
