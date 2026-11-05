@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { when } from "./api";
 import type { Anchor } from "@/lib/coach/types";
-import type { Flag, ParkedItem, Version } from "@/lib/api/types";
+import type { Flag, Note, ParkedItem, Version } from "@/lib/api/types";
 import { KIND_LABEL } from "@/lib/versions/policy";
 
 /* ---------- Coach ---------- */
@@ -182,6 +182,110 @@ export function AskPane(p: { turns: AskTurn[]; busy: boolean; onSend: (q: string
         {p.busy && <button className="btn small" onClick={p.onStop}>Stop</button>}
         <button className="btn ghost small" onClick={p.onClear} disabled={p.busy}>Clear chat</button>
       </div>
+    </section>
+  );
+}
+
+/* ---------- Notes (scraps for this piece) ---------- */
+
+const URL_RE = /(https?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)\]])/g;
+
+function Linkified({ text }: { text: string }) {
+  const parts = text.split(URL_RE);
+  return <>{parts.map((p, i) => (i % 2 ? <a key={i} href={p} target="_blank" rel="noopener noreferrer">{p}</a> : p))}</>;
+}
+
+export function NotesPane(p: {
+  notes: Note[];
+  inputRef: React.RefObject<HTMLTextAreaElement | null>;
+  onAdd: (text: string) => Promise<boolean>;
+  onAddImages: (files: File[], text: string) => Promise<boolean>;
+  onUpdate: (id: string, text: string) => Promise<boolean>;
+  onDelete: (id: string) => void;
+  onInsert: (n: Note) => void;
+  onCopy: (t: string) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+
+  const add = async () => {
+    const t = draft.trim();
+    if (!t || busy) return;
+    setBusy(true);
+    if (await p.onAdd(t)) setDraft("");
+    setBusy(false);
+  };
+  const addImages = async (files: File[]) => {
+    if (!files.length || busy) return;
+    setBusy(true);
+    if (await p.onAddImages(files, draft.trim())) setDraft("");
+    setBusy(false);
+  };
+
+  return (
+    <section className="pane"
+      onDragOver={(e) => { if ([...e.dataTransfer.types].includes("Files")) { e.preventDefault(); setDragOver(true); } }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={(e) => { setDragOver(false); const f = [...e.dataTransfer.files].filter((x) => x.type.startsWith("image/")); if (f.length) { e.preventDefault(); addImages(f); } }}>
+      <p className="hint">Scraps for this piece: a line, a link, an image, anything that connects. They stay out of the draft, the word count and the coach. Ask can read them. Alt+N jumps here.</p>
+      <textarea ref={p.inputRef} className="in" rows={3} placeholder="Jot a note, or paste a line, link or image" value={draft}
+        style={dragOver ? { borderColor: "var(--accent)" } : undefined}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); add(); } }}
+        onPaste={(e) => {
+          const f = [...e.clipboardData.files].filter((x) => x.type.startsWith("image/"));
+          if (f.length) { e.preventDefault(); addImages(f); }
+        }} />
+      <div className="row">
+        <button className="btn primary small" onClick={add} disabled={busy || !draft.trim()}>{busy ? "Saving…" : "Add note"}</button>
+        <label className="btn small" style={{ cursor: "pointer" }}>
+          Add image
+          <input type="file" accept="image/*" multiple hidden onChange={(e) => { const f = [...(e.target.files || [])]; e.target.value = ""; addImages(f); }} />
+        </label>
+      </div>
+      {!p.notes.length ? <p className="hint">No notes yet.</p> : p.notes.map((n) => (
+        <div className="card note" key={n.id} draggable={editing?.id !== n.id}
+          title="Drag into the draft, or use Insert"
+          onDragStart={(e) => {
+            const esc = (t: string) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]!));
+            const html = n.text.split(/\n\s*\n/).filter(Boolean).map((para) => `<p>${esc(para).replace(/\n/g, "<br>")}</p>`).join("")
+              + (n.image_src ? `<img src="${n.image_src}">` : "");
+            e.dataTransfer.setData("text/html", html);
+            e.dataTransfer.setData("text/plain", n.text);
+            e.dataTransfer.effectAllowed = "copy";
+          }}>
+          {n.image_src && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img className="note-img" src={n.image_src} alt="" loading="lazy" draggable={false} />
+          )}
+          {editing?.id === n.id ? (
+            <>
+              <textarea className="in" rows={4} autoFocus value={editing.text} onChange={(e) => setEditing({ id: n.id, text: e.target.value })}
+                onKeyDown={async (e) => {
+                  if (e.key === "Escape") setEditing(null);
+                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); if (await p.onUpdate(n.id, editing.text)) setEditing(null); }
+                }} />
+              <div className="row">
+                <button className="btn primary small" onClick={async () => { if (await p.onUpdate(n.id, editing.text)) setEditing(null); }}>Save</button>
+                <button className="btn ghost small" onClick={() => setEditing(null)}>Cancel</button>
+              </div>
+            </>
+          ) : (
+            <>
+              {n.text && <div className="note-text"><Linkified text={n.text} /></div>}
+              <div className="hint">{when(n.created_at)}</div>
+              <div className="row">
+                <button className="btn small" onClick={() => p.onInsert(n)}>Insert at cursor</button>
+                {n.text && <button className="btn small" onClick={() => p.onCopy(n.text)}>Copy</button>}
+                <button className="btn ghost small" onClick={() => setEditing({ id: n.id, text: n.text })}>Edit</button>
+                <button className="btn ghost small" onClick={() => p.onDelete(n.id)}>Delete</button>
+              </div>
+            </>
+          )}
+        </div>
+      ))}
     </section>
   );
 }

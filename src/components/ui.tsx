@@ -70,6 +70,17 @@ export function Inline({ nodes }: { nodes?: InlineNode[] }) {
 }
 
 export function Block({ b }: { b: BlockNode }) {
+  if (b.type === "image") {
+    return (
+      <figure className="wd-figure">
+        {b.attrs.src
+          // eslint-disable-next-line @next/next/no-img-element
+          ? <img src={b.attrs.src} alt={b.attrs.alt || ""} loading="lazy" />
+          : <div className="img-missing">This image couldn’t be copied.</div>}
+        {b.attrs.alt && <figcaption>{b.attrs.alt}</figcaption>}
+      </figure>
+    );
+  }
   if (b.type === "heading") return b.attrs.level === 3 ? <h3><Inline nodes={b.content} /></h3> : <h2><Inline nodes={b.content} /></h2>;
   if (b.type === "blockquote") return <blockquote><Inline nodes={b.content} /></blockquote>;
   return <p><Inline nodes={b.content} /></p>;

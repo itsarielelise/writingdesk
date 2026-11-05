@@ -13,7 +13,7 @@ import { Fragment, Slice, type Node as PMNode } from "@tiptap/pm/model";
 import { Mapping } from "@tiptap/pm/transform";
 import { newPid, PID_RE } from "@/lib/doc/model";
 
-const BLOCK_TYPES = ["paragraph", "heading", "blockquote"];
+const BLOCK_TYPES = ["paragraph", "heading", "blockquote", "image"];
 
 /** A quote is a single text block (like a paragraph), so it keeps one stable pid. */
 export const Quote = Node.create({
@@ -23,6 +23,98 @@ export const Quote = Node.create({
   defining: true,
   parseHTML: () => [{ tag: "blockquote" }],
   renderHTML: ({ HTMLAttributes }) => ["blockquote", mergeAttributes(HTMLAttributes), 0],
+});
+
+/* ---------- images ---------- */
+
+/** Where a pasted <img> came from: our own storage, the web, or somewhere we can't fetch. */
+export function classifyImgSrc(src: string): { src?: string; origin?: string } {
+  if (/^\/api\/images\//.test(src)) return { src };
+  try {
+    const u = new URL(src, typeof window !== "undefined" ? window.location.href : "http://localhost");
+    if (u.pathname.startsWith("/api/images/") && typeof window !== "undefined" && u.origin === window.location.origin) return { src: u.pathname };
+  } catch { /* fall through */ }
+  return { origin: src };
+}
+
+/**
+ * An image is its own block with a pid, like a paragraph. `src` is set once the file
+ * is in storage; until then `origin` holds where it came from (a web address, a data:
+ * URL, or a local file reference) and `uploadId` ties it to a file being uploaded.
+ */
+export const Image = Node.create({
+  name: "image",
+  group: "block",
+  atom: true,
+  draggable: true,
+  selectable: true,
+  addAttributes() {
+    return {
+      src: { default: null, parseHTML: (el: HTMLElement) => classifyImgSrc(el.getAttribute("src") || "").src ?? null },
+      alt: { default: null, parseHTML: (el: HTMLElement) => (el.getAttribute("alt") || el.getAttribute("title") || "").trim() || null },
+      origin: { default: null, parseHTML: (el: HTMLElement) => classifyImgSrc(el.getAttribute("src") || "").origin ?? null, rendered: false },
+      uploadId: { default: null, rendered: false },
+      failed: { default: null, rendered: false },
+    };
+  },
+  parseHTML() {
+    return [{ tag: "img[src]" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    // Copy/drag out of the editor: only stored images carry a usable src.
+    const { src, alt } = HTMLAttributes as Record<string, string | null>;
+    return ["figure", { "data-pid": (HTMLAttributes as any)["data-pid"] }, ["img", { src: src || "", alt: alt || "" }]];
+  },
+  addNodeView() {
+    return ({ node, getPos, editor }) => {
+      let current = node;
+      const dom = document.createElement("figure");
+      dom.className = "wd-figure";
+      dom.contentEditable = "false";
+      const media = document.createElement("div");
+      media.className = "wd-media";
+      const cap = document.createElement("input");
+      cap.className = "wd-caption";
+      cap.placeholder = "Add a caption";
+      cap.setAttribute("aria-label", "Image caption");
+      dom.append(media, cap);
+      const render = () => {
+        const a = current.attrs;
+        if (document.activeElement !== cap) cap.value = a.alt || "";
+        if (a.src) {
+          const img = media.querySelector("img") || document.createElement("img");
+          if (img.getAttribute("src") !== a.src) img.setAttribute("src", a.src);
+          img.setAttribute("alt", a.alt || "");
+          img.draggable = false;
+          media.replaceChildren(img);
+        } else {
+          const msg = document.createElement("div");
+          msg.className = "img-missing";
+          msg.textContent = a.failed
+            ? "This image couldn’t be copied. Save it to your computer, then drag the file here."
+            : "Copying image…";
+          media.replaceChildren(msg);
+        }
+      };
+      const commitCaption = () => {
+        const pos = typeof getPos === "function" ? getPos() : null;
+        if (pos == null) return;
+        const alt = cap.value.replace(/\s+/g, " ").trim().slice(0, 500) || null;
+        if (alt === (current.attrs.alt || null)) return;
+        editor.view.dispatch(editor.state.tr.setNodeMarkup(pos, undefined, { ...current.attrs, alt }));
+      };
+      cap.addEventListener("change", commitCaption);
+      cap.addEventListener("blur", commitCaption);
+      cap.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); commitCaption(); editor.commands.focus(); } });
+      render();
+      return {
+        dom,
+        update: (n) => { if (n.type !== current.type) return false; current = n; render(); return true; },
+        stopEvent: (e) => e.target === cap,
+        ignoreMutation: () => true,
+      };
+    };
+  },
 });
 
 /* ---------- margin marks, current paragraph, flash ---------- */
@@ -153,6 +245,7 @@ export const editorExtensions = [
   Paragraph,
   Heading.configure({ levels: [2, 3] }),
   Quote,
+  Image,
   Text,
   Bold,
   Italic,
@@ -176,6 +269,11 @@ export function topBlocks(state: EditorState): TopBlock[] {
 
 /** The top-level block containing the selection head. */
 export function caretBlock(state: EditorState): TopBlock | null {
+  const sel = state.selection as any;
+  if (sel.node && sel.$from.depth === 0) {
+    // A selected image (or other atom) at the top level.
+    return { pid: sel.node.attrs.pid, pos: sel.from, index: sel.$from.index(0), node: sel.node };
+  }
   const $h = state.selection.$head;
   if ($h.depth < 1) return null;
   const pos = $h.before(1);
@@ -194,7 +292,7 @@ export function findBlock(state: EditorState, pid: string): TopBlock | null {
 export function toggleBlock(editor: Editor, type: "heading" | "blockquote") {
   const { state } = editor;
   const b = caretBlock(state);
-  if (!b) return;
+  if (!b || b.node.type.name === "image") return;
   const target = b.node.type.name === type ? "paragraph" : type;
   const nodeType = state.schema.nodes[target];
   const attrs: Record<string, unknown> = { pid: b.node.attrs.pid };

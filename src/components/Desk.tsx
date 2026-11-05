@@ -5,16 +5,17 @@ import { closeHistory } from "@tiptap/pm/history";
 import { api, ls, streamApi } from "./api";
 import { Toast, type ToastAction, type ToastState } from "./ui";
 import { caretBlock, editorExtensions, findBlock, setMarks, toggleBlock, topBlocks } from "./editor/extensions";
-import { CoachPane, VersionsPane, ParkedPane, AnchorPane, AskPane, type AskTurn } from "./panes";
+import { CoachPane, VersionsPane, ParkedPane, AnchorPane, AskPane, NotesPane, type AskTurn } from "./panes";
 import { VersionModal, CompareModal, TakesModal, StitchModal, GuideModal } from "./modals";
 import { FlowDetector, FLOW_CONFIG, MODE_LABEL, MODE_TIP, isWritingMode, type Mode } from "@/lib/flow/detector";
 import { autosaveDue, flowVersionLabel, VERSION_CONFIG, type VersionKind } from "@/lib/versions/policy";
-import { blockText, blocksOf, norm, plainText, sanitizeDoc, wordCount, type BlockNode, type DocJSON } from "@/lib/doc/model";
-import { docToMarkdown, plainPasteToDoc } from "@/lib/doc/markdown";
+import { blockText, blocksOf, docWordCount, norm, plainText, sanitizeDoc, wordCount, type BlockNode, type DocJSON } from "@/lib/doc/model";
+import { docToMarkdown, markdownToDoc, plainPasteToDoc } from "@/lib/doc/markdown";
+import { dataUrlToBlob, imageFiles, importImage, patchImage, uploadImage } from "./images";
 import { COACH_CONFIG, type Anchor, type DraftBlock } from "@/lib/coach/types";
-import type { Flag, OpenPiece, ParkedItem, PieceSummary, Version } from "@/lib/api/types";
+import type { Flag, Note, OpenPiece, ParkedItem, PieceSummary, Version } from "@/lib/api/types";
 
-type Tab = "coach" | "versions" | "parked" | "anchor" | "ask";
+type Tab = "coach" | "notes" | "versions" | "parked" | "anchor" | "ask";
 type ModalState =
   | { kind: "version"; v: Version }
   | { kind: "compare"; v: Version }
@@ -33,6 +34,8 @@ export default function Desk({ email, isAdmin }: DeskProps) {
   const [anchor, setAnchor] = useState<Anchor>({ point: "", sections: "", notThis: "" });
   const [versions, setVersions] = useState<Version[]>([]);
   const [parked, setParked] = useState<ParkedItem[]>([]);
+  const [notes, setNotes] = useState<Note[]>([]);
+  const notesInputRef = useRef<HTMLTextAreaElement | null>(null);
   const [flags, setFlags] = useState<Flag[]>([]);
   const [heldFlags, setHeldFlags] = useState<Flag[]>([]);
   const [mode, setModeState] = useState<Mode>("paused");
@@ -82,6 +85,9 @@ export default function Desk({ email, isAdmin }: DeskProps) {
     tab: "coach" as Tab,
     saving: Promise.resolve() as Promise<unknown>,
     heldFlags: [] as Flag[],
+    uploads: new Map<string, Blob>(),      // uploadId → file waiting to upload
+    imgInflight: new Set<string>(),        // uploadIds / origins being copied
+    pasteFiles: [] as File[],              // files that came with a paste (Word puts images here)
   });
   const S = R.current;
   S.versions = versions; S.coaching = coaching; S.panelOpen = panelOpen; S.tab = tab; S.unseen = unseen; S.heldFlags = heldFlags;
@@ -100,10 +106,27 @@ export default function Desk({ email, isAdmin }: DeskProps) {
       attributes: { spellcheck: "true", "aria-label": "Draft" },
       handlePaste: (view, event) => {
         const dt = event.clipboardData;
-        if (!dt || dt.getData("text/html")) return false;
+        if (!dt) return false;
+        const files = imageFiles(dt.files);
+        const html = dt.getData("text/html");
+        if (html) {
+          // Let the editor parse it; <img> tags become image blocks that get copied in the background.
+          // Word/Docs sometimes reference local files in the HTML and put the real images in `files`.
+          S.pasteFiles = files;
+          return false;
+        }
+        if (files.length) { insertImageFilesRef.current(files); return true; }
         const doc = plainPasteToDoc(dt.getData("text/plain") || "");
         if (!doc) return false;
         editorRef.current?.chain().focus().insertContent(doc.content.map((b) => ({ ...b, attrs: { ...b.attrs, pid: null } }))).run();
+        return true;
+      },
+      handleDrop: (view, event, _slice, moved) => {
+        const files = imageFiles((event as DragEvent).dataTransfer?.files);
+        if (moved || !files.length) return false;
+        event.preventDefault();
+        const at = view.posAtCoords({ left: (event as DragEvent).clientX, top: (event as DragEvent).clientY });
+        insertImageFilesRef.current(files, at?.pos);
         return true;
       },
     },
@@ -168,7 +191,7 @@ export default function Desk({ email, isAdmin }: DeskProps) {
     const text = plainText(content);
     if (!text.trim()) return null;
     if (S.versions[0] && S.versions[0].plain_text === text) return null;
-    const w = wordCount(text);
+    const w = docWordCount(content);
     S.lastSnap = { words: w, at: Date.now(), text };
     try {
       const r = await api<{ version: Version | null; pruned?: string[] }>(`/api/pieces/${id}/versions`, { method: "POST", json: { kind, label: label || "", content } });
@@ -211,6 +234,7 @@ export default function Desk({ email, isAdmin }: DeskProps) {
 
   function onDocChange(ed: Editor) {
     setDocVersion((n) => n + 1);
+    queueMicrotask(() => processImagesRef.current());
     if (S.suppress || !S.pieceId) return;
     const now = Date.now();
     const blocks = topBlocks(ed.state);
@@ -244,6 +268,65 @@ export default function Desk({ email, isAdmin }: DeskProps) {
     const cb = caretBlock(ed.state);
     if (cb) setCur(cb.pid);
   }
+
+  /* ---------- images ---------- */
+  const insertImageFilesRef = useRef<(files: File[], pos?: number) => void>(() => {});
+  const processImagesRef = useRef<() => void>(() => {});
+
+  insertImageFilesRef.current = (files: File[], pos?: number) => {
+    const ed = editorRef.current;
+    if (!ed || !S.pieceId || !files.length) return;
+    const nodes = files.map((f) => {
+      const uploadId = Math.random().toString(36).slice(2);
+      S.uploads.set(uploadId, f);
+      return { type: "image", attrs: { uploadId } };
+    });
+    ed.view.dispatch(closeHistory(ed.state.tr));
+    if (pos != null) ed.chain().focus().insertContentAt(pos, nodes).run();
+    else ed.chain().focus().insertContent(nodes).run();
+  };
+
+  processImagesRef.current = () => {
+    const ed = editorRef.current, pieceId = S.pieceId;
+    if (!ed || ed.isDestroyed || !pieceId) return;
+    const jobs: { key: string; run: () => Promise<string>; match: (a: Record<string, any>) => boolean }[] = [];
+    let localRefs = 0;
+    ed.state.doc.forEach((n) => {
+      if (n.type.name !== "image" || n.attrs.src || n.attrs.failed) return;
+      const { uploadId, origin } = n.attrs as { uploadId?: string; origin?: string };
+      if (uploadId) {
+        const file = S.uploads.get(uploadId);
+        if (!file || S.imgInflight.has(uploadId)) return;
+        jobs.push({ key: uploadId, run: () => uploadImage(pieceId, file), match: (a) => a.uploadId === uploadId });
+      } else if (origin && !S.imgInflight.has(origin)) {
+        if (/^https?:\/\//i.test(origin)) {
+          jobs.push({ key: origin, run: () => importImage(pieceId, origin), match: (a) => !a.src && a.origin === origin });
+        } else if (origin.startsWith("data:")) {
+          const blob = dataUrlToBlob(origin);
+          if (blob) jobs.push({ key: origin, run: () => uploadImage(pieceId, blob), match: (a) => !a.src && a.origin === origin });
+          else patchImage(ed, (a) => !a.src && a.origin === origin, { failed: true });
+        } else {
+          // file:, blob:, cid: references from Word/Docs: use the image files that came with the paste, in order.
+          const file = S.pasteFiles[localRefs++];
+          if (file) jobs.push({ key: origin, run: () => uploadImage(pieceId, file), match: (a) => !a.src && a.origin === origin });
+          else patchImage(ed, (a) => !a.src && a.origin === origin, { failed: true });
+        }
+      }
+    });
+    if (localRefs) S.pasteFiles = [];
+    for (const j of jobs) {
+      S.imgInflight.add(j.key);
+      j.run().then(
+        (src) => { if (editorRef.current) patchImage(editorRef.current, j.match, { src, origin: null, uploadId: null, failed: null }); saveSoon(); },
+        (e) => {
+          if (editorRef.current) patchImage(editorRef.current, j.match, { failed: true });
+          if ((e as Error)?.message) showToast((e as Error).message);
+        },
+      ).finally(() => { S.imgInflight.delete(j.key); S.uploads.delete(j.key); });
+    }
+  };
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   /* ---------- flags ---------- */
   const visibleFlags = useMemo(() => {
@@ -334,7 +417,7 @@ export default function Desk({ email, isAdmin }: DeskProps) {
     if (m !== S.mode) {
       const prev = S.mode;
       S.mode = m; setModeState(m);
-      const w = wordCount(plainText(currentDoc()));
+      const w = docWordCount(currentDoc());
       const label = flowVersionLabel(prev, m, w, S.lastSnap.words);
       if (label) snapshot("flow", label);
       if (m === "looping") maybeLoopToast();
@@ -374,7 +457,7 @@ export default function Desk({ email, isAdmin }: DeskProps) {
     S.anchor = a; setAnchor(a);
     const vs = data.versions.map((v) => ({ ...v, content: sanitizeDoc(v.content) }));
     S.versions = vs; setVersions(vs);
-    setParked(data.parked); setFlags(data.flags); setHeldFlags([]);
+    setParked(data.parked); setNotes(data.notes || []); setFlags(data.flags); setHeldFlags([]);
     S.revs = { ...data.meta }; S.revsDirty.clear();
     S.detector.reset(); S.mode = "paused"; setModeState("paused");
     S.pending.clear(); S.unseen = 0; setUnseen(0); S.curPid = null;
@@ -389,12 +472,13 @@ export default function Desk({ email, isAdmin }: DeskProps) {
     S.lastLen = ed.state.doc.textContent.length;
     const v0 = vs[0];
     const text = plainText(doc);
-    S.lastSnap = v0 ? { words: v0.word_count, at: new Date(v0.created_at).getTime(), text: v0.plain_text } : { words: wordCount(text), at: Date.now(), text: "" };
-    setWords(wordCount(text));
+    S.lastSnap = v0 ? { words: v0.word_count, at: new Date(v0.created_at).getTime(), text: v0.plain_text } : { words: docWordCount(doc), at: Date.now(), text: "" };
+    setWords(docWordCount(doc));
     setEmpty(!text.trim());
     pushMarks();
     ed.setEditable(true);
     ed.commands.focus("end");
+    queueMicrotask(() => processImagesRef.current());
     setSaveState({ s: "saved" });
     setDocVersion((n) => n + 1);
   }, [S, saveNow, showToast, currentDoc, pushMarks]);
@@ -490,8 +574,10 @@ export default function Desk({ email, isAdmin }: DeskProps) {
     const ed = editorRef.current;
     if (!ed) return;
     const b = findBlock(ed.state, pid);
-    if (!b || !b.node.textContent.trim()) return;
-    const text = b.node.textBetween(0, b.node.content.size, "\n");
+    const isImg = b?.node.type.name === "image";
+    if (!b || (!isImg && !b.node.textContent.trim())) return;
+    if (isImg && !b.node.attrs.src) { showToast("Wait for the image to finish copying first."); return; }
+    const text = isImg ? blockText(sanitizeDoc({ type: "doc", content: [b.node.toJSON()] }).content[0]) : b.node.textBetween(0, b.node.content.size, "\n");
     const only = ed.state.doc.childCount === 1;
     ed.chain().focus().command(({ tr, state }) => {
       closeHistory(tr); // its own undo step, so Undo brings back just this paragraph
@@ -500,35 +586,82 @@ export default function Desk({ email, isAdmin }: DeskProps) {
       return true;
     }).run();
     parkUndoToast(await addParked(text));
-  }, [addParked, parkUndoToast]);
+  }, [addParked, parkUndoToast, showToast]);
 
   const park = useCallback(async () => {
     const ed = editorRef.current;
     if (!ed || !S.pieceId) return;
-    const { from, to, empty } = ed.state.selection;
+    const sel = ed.state.selection as any;
+    const { from, to, empty } = sel;
+    if (sel.node && sel.node.type.name === "image") { parkBlock(sel.node.attrs.pid); return; }
     if (!empty) {
-      const text = ed.state.doc.textBetween(from, to, "\n\n", "\n");
+      // Keep images and bold/italic: park the selection as Markdown.
+      const slice = ed.state.doc.slice(from, to).content.toJSON() || [];
+      const text = docToMarkdown(sanitizeDoc({ type: "doc", content: slice })).trim() || ed.state.doc.textBetween(from, to, "\n\n", "\n");
       ed.chain().focus().command(({ tr }) => { closeHistory(tr); tr.deleteSelection(); return true; }).run();
       parkUndoToast(await addParked(text));
     } else {
       const cb = caretBlock(ed.state);
-      if (cb && cb.node.textContent.trim()) parkBlock(cb.pid);
+      if (cb && (cb.node.type.name === "image" || cb.node.textContent.trim())) parkBlock(cb.pid);
       else showToast("Select some text or put your cursor in a paragraph.");
     }
   }, [S, addParked, parkBlock, parkUndoToast, showToast]);
 
-  const insertParked = useCallback((it: ParkedItem) => {
+  const insertMarkdown = useCallback((text: string) => {
     const ed = editorRef.current;
     if (!ed) return;
     const cb = (S.curPid && findBlock(ed.state, S.curPid)) || null;
     const pos = cb ? cb.pos + cb.node.nodeSize : ed.state.doc.content.size;
-    const paras = it.text.split(/\n\s*\n/).map((t) => t.trim()).filter(Boolean)
-      .map((t) => ({ type: "paragraph", content: t.split("\n").flatMap((l, i) => [...(i ? [{ type: "hardBreak" }] : []), ...(l ? [{ type: "text", text: l }] : [])]) }));
+    // Parked text may hold image lines (![caption](/api/images/...)), so read it as Markdown.
+    const paras = markdownToDoc(text).content.map((b) => ({ ...b, attrs: { ...b.attrs, pid: null } }));
     ed.view.dispatch(closeHistory(ed.state.tr));
     ed.chain().focus().insertContentAt(pos, paras).run();
     const after = topBlocks(ed.state).find((b) => b.pos >= pos);
     if (after) jumpTo(after.pid);
   }, [S, jumpTo]);
+  const insertParked = useCallback((it: ParkedItem) => insertMarkdown(it.text), [insertMarkdown]);
+
+  /* ---------- notes ---------- */
+  const addNote = useCallback(async (text: string, image_src?: string): Promise<boolean> => {
+    if (!S.pieceId) return false;
+    try {
+      const r = await api<{ note: Note }>(`/api/pieces/${S.pieceId}/notes`, { method: "POST", json: { text, image_src } });
+      setNotes((n) => [r.note, ...n]);
+      return true;
+    } catch (e) { showToast((e as Error).message); return false; }
+  }, [S, showToast]);
+
+  const addImageNotes = useCallback(async (files: File[], text: string): Promise<boolean> => {
+    if (!S.pieceId) return false;
+    let ok = true;
+    for (const [i, f] of files.entries()) {
+      try { ok = (await addNote(i === 0 ? text : "", await uploadImage(S.pieceId, f))) && ok; }
+      catch (e) { showToast((e as Error).message); ok = false; }
+    }
+    return ok;
+  }, [S, addNote, showToast]);
+
+  const updateNote = useCallback(async (id: string, text: string): Promise<boolean> => {
+    if (!S.pieceId) return false;
+    try {
+      const r = await api<{ note: Note }>(`/api/pieces/${S.pieceId}/notes/${id}`, { method: "PATCH", json: { text } });
+      setNotes((ns) => ns.map((n) => (n.id === id ? r.note : n)));
+      return true;
+    } catch (e) { showToast((e as Error).message); return false; }
+  }, [S, showToast]);
+
+  const deleteNote = useCallback((id: string) => {
+    const removed = notes.find((n) => n.id === id);
+    setNotes((ns) => ns.filter((n) => n.id !== id));
+    if (S.pieceId) api(`/api/pieces/${S.pieceId}/notes/${id}`, { method: "DELETE" }).catch(() => {
+      showToast("That note couldn’t be deleted.");
+      if (removed) setNotes((ns) => [removed, ...ns]);
+    });
+  }, [S, notes, showToast]);
+
+  const insertNote = useCallback((n: Note) => {
+    insertMarkdown([n.text.trim(), n.image_src ? `![](${n.image_src})` : ""].filter(Boolean).join("\n\n"));
+  }, [insertMarkdown]);
 
   /** Replace the whole document (restore, stitch). Not counted as typing. */
   const replaceDoc = useCallback((doc: DocJSON) => {
@@ -542,7 +675,7 @@ export default function Desk({ email, isAdmin }: DeskProps) {
     S.lastLen = ed.state.doc.textContent.length;
     S.curPid = null;
     pushMarks();
-    setWords(wordCount(plainText(d)));
+    setWords(docWordCount(d));
     setEmpty(!plainText(d).trim());
     saveSoon();
   }, [S, currentDoc, pushMarks, saveSoon]);
@@ -593,7 +726,7 @@ export default function Desk({ email, isAdmin }: DeskProps) {
   }, [S]);
 
   const exportMd = useCallback((how: "download" | "copy") => {
-    const md = docToMarkdown(currentDoc(), S.title || undefined);
+    const md = docToMarkdown(currentDoc(), S.title || undefined, window.location.origin);
     if (how === "copy") {
       navigator.clipboard?.writeText(md).then(() => showToast("Copied as Markdown."), () => showToast("Couldn’t copy."));
       return;
@@ -627,11 +760,12 @@ export default function Desk({ email, isAdmin }: DeskProps) {
   useEffect(() => {
     const k = (e: KeyboardEvent) => {
       if (e.altKey && e.code === "KeyP") { e.preventDefault(); park(); }
+      if (e.altKey && e.code === "KeyN") { e.preventDefault(); openPanel("notes"); setTimeout(() => notesInputRef.current?.focus(), 0); }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); saveVersionNow(); }
     };
     document.addEventListener("keydown", k);
     return () => document.removeEventListener("keydown", k);
-  }, [park, saveVersionNow]);
+  }, [park, saveVersionNow, openPanel]);
 
   /* ---------- anchor + title ---------- */
   const updateAnchor = useCallback((patch: Partial<Anchor>) => {
@@ -666,6 +800,8 @@ export default function Desk({ email, isAdmin }: DeskProps) {
 
   /* ---------- ask ---------- */
   const askRef = useRef<AbortController | null>(null);
+  const notesRef = useRef<Note[]>([]);
+  notesRef.current = notes;
   const [askBusy, setAskBusy] = useState(false);
   const sendAsk = useCallback(async (q: string) => {
     if (askRef.current) return;
@@ -675,7 +811,7 @@ export default function Desk({ email, isAdmin }: DeskProps) {
     let out = "";
     const patchLast = (p: Partial<AskTurn>) => setAskTurns((t) => { const c = [...t]; c[c.length - 1] = { ...c[c.length - 1], ...p }; return c; });
     try {
-      await streamApi("/api/ai/ask", { anchor: S.anchor, draft: draftText().slice(0, 120_000), turns: history.slice(-12).map(({ role, content }) => ({ role, content })) }, (e) => {
+      await streamApi("/api/ai/ask", { anchor: S.anchor, draft: draftText().slice(0, 120_000), notes: notesRef.current.map((n) => [n.text, n.image_src ? "(image)" : ""].filter(Boolean).join(" ")).filter(Boolean).slice(0, 300), turns: history.slice(-12).map(({ role, content }) => ({ role, content })) }, (e) => {
         if (e.type === "text") { out += e.text; patchLast({ content: out, status: undefined }); }
         else if (e.type === "citation") setAskTurns((t) => { const c = [...t]; const last = c[c.length - 1]; c[c.length - 1] = { ...last, citations: [...(last.citations || []), { url: e.url, title: e.title }] }; return c; });
         else if (e.type === "status") patchLast({ status: e.text });
@@ -713,6 +849,9 @@ export default function Desk({ email, isAdmin }: DeskProps) {
           <button className="btn ghost" title="Heading" onMouseDown={(e) => e.preventDefault()} onClick={() => editor && toggleBlock(editor, "heading")}>H</button>
           <button className="btn ghost" title="Quote" onMouseDown={(e) => e.preventDefault()} onClick={() => editor && toggleBlock(editor, "blockquote")}>“ ”</button>
           <button className="btn ghost" title="Move selection or paragraph to Parked (Alt+P)" onMouseDown={(e) => e.preventDefault()} onClick={park}>Park</button>
+          <button className="btn ghost" title="Add an image (or paste / drag one in)" onMouseDown={(e) => e.preventDefault()} onClick={() => fileInputRef.current?.click()}>Image</button>
+          <input ref={fileInputRef} type="file" accept="image/*" multiple hidden
+            onChange={(e) => { const f = imageFiles(e.target.files); e.target.value = ""; insertImageFilesRef.current(f); }} />
         </div>
         <div className="bar-group">
           <span className="mode" data-mode={mode} title={MODE_TIP[mode]}><span className="dot" /><span>{MODE_LABEL[mode]}</span></span>
@@ -750,7 +889,7 @@ export default function Desk({ email, isAdmin }: DeskProps) {
         {panelOpen && (
           <aside className="panel" id="panel">
             <nav className="tabs" role="tablist">
-              {(["coach", "versions", "parked", "anchor", "ask"] as Tab[]).map((t) => (
+              {(["coach", "notes", "versions", "parked", "anchor", "ask"] as Tab[]).map((t) => (
                 <button key={t} className="tab" role="tab" aria-selected={tab === t} onClick={() => selectTab(t)}>
                   {t[0].toUpperCase() + t.slice(1)}
                 </button>
@@ -766,9 +905,14 @@ export default function Desk({ email, isAdmin }: DeskProps) {
                 onJump={jumpTo} onPark={(f) => { parkBlock(f.pid); dismissFlag(f); }} onDismiss={dismissFlag} onExplain={explainFlag}
               />
             )}
+            {tab === "notes" && (
+              <NotesPane notes={notes} inputRef={notesInputRef} onAdd={(t) => addNote(t)} onAddImages={addImageNotes}
+                onUpdate={updateNote} onDelete={deleteNote} onInsert={insertNote}
+                onCopy={(t) => navigator.clipboard?.writeText(t).then(() => showToast("Copied."), () => {})} />
+            )}
             {tab === "versions" && (
               <VersionsPane versions={versions} onOpen={(v) => setModal({ kind: "version", v })} onSave={saveVersionNow}
-                onStitch={() => { if (wordCount(draftText()) < 50) showToast("Write a bit more before stitching."); else setModal({ kind: "stitch" }); }}
+                onStitch={() => { if (docWordCount(currentDoc()) < 50) showToast("Write a bit more before stitching."); else setModal({ kind: "stitch" }); }}
                 onExport={() => exportMd("download")} onCopy={() => exportMd("copy")} />
             )}
             {tab === "parked" && (

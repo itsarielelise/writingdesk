@@ -1,4 +1,4 @@
-import { blockText, newPid, type BlockNode, type DocJSON, type InlineNode, type TextNode } from "./model";
+import { blockText, IMAGE_SRC_RE, imageToken, newPid, type BlockNode, type DocJSON, type InlineNode, type TextNode } from "./model";
 
 /* ---------- doc → Markdown ---------- */
 
@@ -15,8 +15,13 @@ function inlineToMd(nodes: InlineNode[] = []): string {
   return out;
 }
 
-export function docToMarkdown(doc: DocJSON, title?: string): string {
+/** `origin` makes stored image links absolute (for export outside the app). */
+export function docToMarkdown(doc: DocJSON, title?: string, origin = ""): string {
   const parts = doc.content.map((b) => {
+    if (b.type === "image") {
+      const tok = imageToken(b);
+      return b.attrs.src && origin ? tok.replace(`(${b.attrs.src})`, `(${origin}${b.attrs.src})`) : tok;
+    }
     const t = inlineToMd(b.content).trim();
     if (!t) return null;
     if (b.type === "heading") return (b.attrs.level === 3 ? "### " : "## ") + t;
@@ -58,6 +63,16 @@ export function markdownToDoc(md: string): DocJSON {
     if (!c) return null;
     const h = c.match(/^(#{1,3})\s+([\s\S]*)$/);
     if (h) return { type: "heading", attrs: { pid: newPid(), level: h[1].length === 3 ? 3 : 2 }, content: inlineFromMd(h[2].replace(/\n/g, " ")) };
+    const img = c.match(/^!\[([^\]]*)\]\((\S+?)\)$/);
+    if (img) {
+      const url = img[2].replace(/^https?:\/\/[^/]+(?=\/api\/images\/)/, "");
+      const attrs: BlockNode["attrs"] = { pid: newPid() };
+      if (IMAGE_SRC_RE.test(url)) attrs.src = url;
+      else if (/^https?:\/\//.test(url)) attrs.origin = url;
+      else return { type: "paragraph", attrs: { pid: newPid() }, content: inlineFromMd(c) };
+      if (img[1].trim()) attrs.alt = img[1].trim();
+      return { type: "image", attrs };
+    }
     const lines = c.split("\n");
     if (lines.every((l) => /^>/.test(l))) return { type: "blockquote", attrs: { pid: newPid() }, content: inlineFromMd(lines.map((l) => l.replace(/^>\s?/, "")).join("\n")) };
     return { type: "paragraph", attrs: { pid: newPid() }, content: inlineFromMd(c) };

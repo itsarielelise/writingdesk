@@ -57,6 +57,7 @@ Rules:
 - Remove repeated points: keep the best statement of each idea, once.
 - Follow the planned section order when one is given. Put material that doesn't serve the main point in a final section headed "## Parked for later" instead of deleting it.
 - Format in Markdown: ## for section headings, > for quotations, a blank line between paragraphs. Keep poem lines on separate lines.
+- Lines like ![caption](/api/images/...) are the writer's images. Keep every image line exactly as written, on its own line, next to the text it belongs with. Never invent, alter or drop image lines.
 
 Write the stitched article first. Then a line containing exactly ${STITCH_NOTES_MARK} and then 3 to 8 short bullet notes on your main choices: what you restored and from which version, what you cut as repeated, and what you moved.
 
@@ -67,7 +68,7 @@ SOURCES (the current draft first, then earlier versions)
 ` + sources.map((s) => `===== ${s.label} =====\n${s.text}`).join("\n\n");
 }
 
-export function askSystemPrompt(anchor: Anchor, draft: string): string {
+export function askSystemPrompt(anchor: Anchor, draft: string, notes: string[] = []): string {
   return `You are the writer's research assistant and editor for the piece below. You can search the web: use it to check facts, find references and sources, and cite the pages you relied on. Say plainly when something is uncertain or you couldn't confirm it.
 
 When you suggest edits, keep the writer's voice: quote the exact sentences you would change and keep changes small. Never rewrite whole paragraphs unless asked. Be concise.
@@ -76,7 +77,10 @@ PIECE ANCHOR
 ${anchorBlock(anchor)}
 
 CURRENT DRAFT
-${draft}`;
+${draft}${notes.length ? `
+
+WRITER'S NOTES (loose scraps the writer jotted for this piece: lines, links, ideas that connect in their head; not part of the draft)
+${notes.map((n) => `- ${n.replace(/\n+/g, " / ")}`).join("\n")}` : ""}`;
 }
 
 export function explainPrompt(args: { type: string; note: string; paragraph: string; other?: string | null; anchor: Anchor }): string {

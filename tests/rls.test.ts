@@ -17,6 +17,13 @@ create table auth.users (id uuid primary key, email text);
 create function auth.jwt() returns jsonb language sql stable as $$ select coalesce(nullif(current_setting('request.jwt.claims', true), ''), '{}')::jsonb $$;
 create function auth.uid() returns uuid language sql stable as $$ select nullif(auth.jwt() ->> 'sub', '')::uuid $$;
 grant usage on schema auth to anon, authenticated, service_role;
+create schema storage;
+create table storage.buckets (id text primary key, name text, public boolean, file_size_limit bigint, allowed_mime_types text[]);
+create table storage.objects (id uuid primary key default gen_random_uuid(), bucket_id text, name text);
+alter table storage.objects enable row level security;
+create function storage.foldername(name text) returns text[] language sql immutable as $$ select (string_to_array(name, '/'))[1:array_length(string_to_array(name, '/'), 1) - 1] $$;
+grant usage on schema storage to anon, authenticated, service_role;
+grant all on all tables in schema storage to authenticated, service_role;
 grant execute on all functions in schema auth to anon, authenticated, service_role;
 `;
 
@@ -29,7 +36,7 @@ const q = (sql: string, params: unknown[] = []) => db.query<any>(sql, params);
 beforeAll(async () => {
   db = new PGlite();
   await db.exec(SUPABASE_STUB);
-  for (const m of ["0001_init.sql", "0002_private_helpers.sql"]) {
+  for (const m of ["0001_init.sql", "0002_private_helpers.sql", "0003_images_and_notes.sql"]) {
     await db.exec(readFileSync(new URL(`../supabase/migrations/${m}`, import.meta.url), "utf8"));
   }
   await db.exec(`
@@ -48,13 +55,15 @@ beforeAll(async () => {
       await q(`insert into flags (piece_id, user_id, pid, type, confidence, note) values ($1, $2, 'abcd1234', 'repeat', 0.9, 'n')`, [pid, uid]);
       await q(`insert into parked_items (piece_id, user_id, text) values ($1, $2, 'parked ' || $3)`, [pid, uid, email]);
       await q(`insert into paragraph_meta (piece_id, user_id, pid, rev_count) values ($1, $2, 'abcd1234', 2)`, [pid, uid]);
+      await q(`insert into notes (piece_id, user_id, text) values ($1, $2, 'note of ' || $3)`, [pid, uid, email]);
+      await q(`insert into storage.objects (bucket_id, name) values ('images', $1 || '/' || $2 || '/f.png')`, [uid, pid]);
     });
   }
 });
 afterAll(async () => { await db?.close(); });
 
 describe("row level security", () => {
-  for (const table of ["pieces", "versions", "flags", "parked_items", "paragraph_meta"]) {
+  for (const table of ["pieces", "versions", "flags", "parked_items", "paragraph_meta", "notes"]) {
     it(`user A sees only their own ${table}`, async () => {
       const rows = await as(A, "a@example.com", async () => (await q(`select user_id from ${table}`)).rows);
       expect(rows.length).toBe(1);
@@ -101,6 +110,28 @@ describe("row level security", () => {
       expect((await q(`select * from allowed_emails`)).rows).toEqual([]);
       await expect(q(`insert into ai_usage (user_id, provider, feature) values ($1, 'anthropic', 'ask')`, [A])).rejects.toThrow(/row-level security/);
     });
+  });
+
+  it("each writer can only read and add images in their own folder", async () => {
+    await as(A, "a@example.com", async () => {
+      const { rows } = await q(`select name from storage.objects`);
+      expect(rows.length).toBe(1);
+      expect(rows[0].name.startsWith(A + "/")).toBe(true);
+      await expect(q(`insert into storage.objects (bucket_id, name) values ('images', $1)`, [`${B}/x/y.png`])).rejects.toThrow(/row-level security/);
+      await expect(q(`insert into storage.objects (bucket_id, name) values ('other', $1)`, [`${A}/x/y.png`])).rejects.toThrow(/row-level security/);
+      await q(`insert into storage.objects (bucket_id, name) values ('images', $1)`, [`${A}/x/z.png`]);
+      // No delete policy: stored images stay so older versions can show them.
+      const d = await q(`delete from storage.objects where name = $1`, [`${A}/x/z.png`]);
+      expect(d.affectedRows).toBe(0);
+    });
+    await as(C, "c@example.com", async () => {
+      await expect(q(`insert into storage.objects (bucket_id, name) values ('images', $1)`, [`${C}/x/y.png`])).rejects.toThrow(/row-level security/);
+    });
+  });
+
+  it("the images bucket is private", async () => {
+    const { rows } = await q(`select public from storage.buckets where id = 'images'`);
+    expect(rows).toEqual([{ public: false }]);
   });
 
   it("RLS helpers aren't callable by anonymous users", async () => {

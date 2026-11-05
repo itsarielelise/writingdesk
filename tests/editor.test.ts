@@ -136,3 +136,39 @@ describe("undo boundaries", () => {
     e.destroy();
   });
 });
+
+describe("images in the editor", () => {
+  it("turns pasted <img> tags into image blocks with fresh pids, queued for copying", () => {
+    const e = new Editor({ element: document.createElement("div"), extensions: editorExtensions, content: start });
+    caretIn(e, "bbbb0001", "Second paragraph.".length);
+    (e.view as any).pasteHTML('<p>Intro</p><p><img src="https://example.com/cat.png" alt="A cat"></p><p>After</p>');
+    const imgs = topBlocks(e.state).filter((b) => b.node.type.name === "image");
+    expect(imgs).toHaveLength(1);
+    expect(imgs[0].node.attrs).toMatchObject({ origin: "https://example.com/cat.png", alt: "A cat", src: null });
+    expect(imgs[0].pid).toMatch(/^[a-z0-9]{8}$/);
+    expect(new Set(pids(e)).size).toBe(pids(e).length);
+    expect(pids(e).slice(0, 2)).toEqual(["aaaa0001", "bbbb0001"]);
+    e.destroy();
+  });
+
+  it("recognises images already stored by this app", () => {
+    const e = new Editor({ element: document.createElement("div"), extensions: editorExtensions, content: start });
+    const src = "/api/images/11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222/33333333-3333-4333-8333-333333333333.png";
+    (e.view as any).pasteHTML(`<img src="${src}">`);
+    const img = topBlocks(e.state).find((b) => b.node.type.name === "image")!;
+    expect(img.node.attrs.src).toBe(src);
+    expect(sanitizeDoc(e.getJSON()).content.find((b) => b.type === "image")!.attrs.src).toBe(src);
+    e.destroy();
+  });
+
+  it("keeps an image's pid through undo", () => {
+    const e = new Editor({ element: document.createElement("div"), extensions: editorExtensions, content: {
+      type: "doc", content: [...start.content, { type: "image", attrs: { pid: "imgx0001", src: "/api/images/a" } }] } });
+    const img = findBlock(e.state, "imgx0001")!;
+    e.chain().command(({ tr }) => { tr.delete(img.pos, img.pos + img.node.nodeSize); return true; }).run();
+    expect(findBlock(e.state, "imgx0001")).toBeNull();
+    e.commands.undo();
+    expect(findBlock(e.state, "imgx0001")).not.toBeNull();
+    e.destroy();
+  });
+});

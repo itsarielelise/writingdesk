@@ -1,6 +1,6 @@
 import { body, HttpError, json, route, uuid } from "@/lib/server/access";
 import { versionCreate } from "@/lib/server/schemas";
-import { plainText, sanitizeDoc, wordCount } from "@/lib/doc/model";
+import { docWordCount, plainText, sanitizeDoc } from "@/lib/doc/model";
 import { VERSION_CONFIG } from "@/lib/versions/policy";
 
 type P = { id: string };
@@ -15,7 +15,7 @@ export const POST = route<P>("versions.create", async ({ supabase, user, params,
   if (e1) throw e1;
   if (newest && newest.plain_text === text) return json({ version: null, skipped: "identical" });
   const { data, error } = await supabase.from("versions").insert({
-    piece_id: pieceId, user_id: user.id, kind: v.kind, label: v.label, content, plain_text: text, word_count: wordCount(text),
+    piece_id: pieceId, user_id: user.id, kind: v.kind, label: v.label, content, plain_text: text, word_count: docWordCount(content),
   }).select("*").single();
   if (error) { if (error.code === "42501") throw new HttpError(404, "That piece couldn’t be found."); throw error; }
   let pruned: string[] = [];

@@ -170,6 +170,8 @@ export function GuideModal({ onClose }: { onClose: () => void }) {
           <li><b>Flow</b>The pill at the top shows how you’re writing. When you’re moving forward steadily it says <i>In flow</i>, the bar on the page turns green and the toolbar fades. If you keep reworking the same paragraph it says <i>Looping?</i> and offers your earlier takes.</li>
           <li><b>Versions</b>A version saves itself when a run of writing ends, every few minutes while you revise, and before any big change. Open one to restore it or compare it with now, paragraph by paragraph. <i>Stitch best draft</i> asks Claude to assemble the strongest draft from them.</li>
           <li><b>Parking</b>Select text, or put your cursor in a paragraph, and press <i>Park</i> (Alt+P). It leaves the draft but waits in the Parked tab for a later post.</li>
+          <li><b>Notes</b>The Notes tab (Alt+N) is for scraps: lines, links and images that connect to the piece but aren’t part of it yet. They stay out of the word count and the coach. Drag one into the draft when it’s ready.</li>
+          <li><b>Images</b>Paste or drag images in, or use the Image button. Images pasted from web pages or Google Docs are copied into your private storage so they don’t disappear later.</li>
           <li><b>The anchor</b>Tell the Anchor tab what the piece is about, its sections and what’s not in it. Live coaching uses it to flag repeats, tangents and paragraphs in the wrong section, and only shows notes when you pause.</li>
         </ol>
         <p className="hint">Ctrl/Cmd+S saves a version. Your writing is private to you.</p>

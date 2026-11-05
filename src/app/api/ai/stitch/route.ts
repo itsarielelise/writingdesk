@@ -15,7 +15,7 @@ const MAX_EARLIER = 11;
 
 export const POST = route("ai.stitch", async ({ supabase, user, req }) => {
   const { pieceId, draft, anchor } = await body(req, z.object({ pieceId: uuid, draft: z.string().max(BUDGET_CHARS), anchor: anchorSchema }));
-  if (wordCount(draft) < 50) return json({ error: "Write a bit more before stitching." }, 400);
+  if (wordCount(draft.replace(/!\[[^\]]*\]\([^)]*\)/g, "")) < 50) return json({ error: "Write a bit more before stitching." }, 400);
   await enforceDailyCap(user.id, "stitch");
 
   const { data: versions, error } = await supabase.from("versions").select("kind,plain_text,created_at")

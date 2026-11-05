@@ -1,15 +1,19 @@
 // The editor's document model (TipTap/ProseMirror JSON), restricted to what the
 // editor supports: paragraphs, h2/h3 headings and quotes as top-level text blocks,
-// with bold, italic and hard breaks inline. Every block carries a stable `pid`.
+// with bold, italic and hard breaks inline, plus image blocks. Every block carries a stable `pid`.
 
 export type MarkType = "bold" | "italic";
 export interface TextNode { type: "text"; text: string; marks?: { type: MarkType }[] }
 export interface HardBreakNode { type: "hardBreak" }
 export type InlineNode = TextNode | HardBreakNode;
-export type BlockType = "paragraph" | "heading" | "blockquote";
+export type BlockType = "paragraph" | "heading" | "blockquote" | "image";
 export interface BlockNode {
   type: BlockType;
-  attrs: { pid: string; level?: 2 | 3 };
+  /**
+   * Images: `src` is an internal path (/api/images/...) once stored; `origin` is the
+   * external URL it was pasted from while (or if) it couldn't be copied; `alt` is the caption.
+   */
+  attrs: { pid: string; level?: 2 | 3; src?: string; alt?: string; origin?: string };
   content?: InlineNode[];
 }
 export interface DocJSON { type: "doc"; content: BlockNode[] }
@@ -20,6 +24,10 @@ export const newPid = (): string => {
   globalThis.crypto.getRandomValues(a);
   return Array.from(a, (b) => (b % 36).toString(36)).join("");
 };
+
+/** Stored images live at /api/images/<user>/<piece>/<file>. */
+export const IMAGE_SRC_RE = /^\/api\/images\/[0-9a-f-]{36}\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.(png|jpg|webp|gif)$/;
+const ORIGIN_RE = /^https?:\/\/[^\s"'<>]{1,2000}$/;
 
 export const emptyDoc = (): DocJSON => ({ type: "doc", content: [{ type: "paragraph", attrs: { pid: newPid() } }] });
 
@@ -47,11 +55,27 @@ export function sanitizeDoc(input: unknown): DocJSON {
     out.push(b);
   };
 
+  const pushImage = (attrs: Record<string, unknown>) => {
+    if (out.length >= MAX_BLOCKS) return;
+    const src = typeof attrs.src === "string" && IMAGE_SRC_RE.test(attrs.src) ? attrs.src : "";
+    const origin = !src && typeof attrs.origin === "string" && ORIGIN_RE.test(attrs.origin) ? attrs.origin : "";
+    if (!src && !origin) return; // nothing to show: a failed or in-flight local upload
+    let pid = typeof attrs.pid === "string" && PID_RE.test(attrs.pid) ? attrs.pid : "";
+    if (!pid || seen.has(pid)) pid = newPid();
+    seen.add(pid);
+    const alt = typeof attrs.alt === "string" ? attrs.alt.replace(/\s+/g, " ").trim().slice(0, 500) : "";
+    const b: BlockNode = { type: "image", attrs: { pid } };
+    if (src) b.attrs.src = src; else b.attrs.origin = origin;
+    if (alt) b.attrs.alt = alt;
+    out.push(b);
+  };
+
   const walk = (nodes: unknown[]) => {
     for (const n of nodes) {
       if (!isObj(n)) continue;
       const t = n.type;
       const attrs = isObj(n.attrs) ? n.attrs : {};
+      if (t === "image") { pushImage(attrs); continue; }
       if (t === "paragraph" || t === "heading" || t === "blockquote") {
         const kids = Array.isArray(n.content) ? n.content : [];
         // A quote that wraps blocks (TipTap's default shape) is flattened to one quote block.
@@ -119,7 +143,14 @@ function isObj(x: unknown): x is Record<string, any> {
 export const wordCount = (t: string): number => (String(t).match(/\S+/g) || []).length;
 export const norm = (t: string | null | undefined): string => String(t || "").replace(/\s+/g, " ").trim();
 
+/** Markdown-style token for an image, used in plain text, prompts and export. */
+export function imageToken(b: BlockNode): string {
+  const alt = (b.attrs.alt || "").replace(/[\[\]]/g, "");
+  return `![${alt}](${b.attrs.src || b.attrs.origin || ""})`;
+}
+
 export function blockText(b: BlockNode): string {
+  if (b.type === "image") return imageToken(b);
   return (b.content || []).map((n) => (n.type === "text" ? n.text : "\n")).join("");
 }
 
@@ -135,6 +166,11 @@ export function blocksOf(doc: DocJSON): Map<string, BlockInfo> {
 
 export function plainText(doc: DocJSON): string {
   return doc.content.map((b) => blockText(b).trim()).filter(Boolean).join("\n\n");
+}
+
+/** Words in the draft, not counting images. */
+export function docWordCount(doc: DocJSON): number {
+  return wordCount(doc.content.filter((b) => b.type !== "image").map(blockText).join("\n\n"));
 }
 
 export const isHeading = (b: { type: BlockType }) => b.type === "heading";

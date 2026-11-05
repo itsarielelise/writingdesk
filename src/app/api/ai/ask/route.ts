@@ -10,11 +10,21 @@ import { ndjson } from "@/lib/server/stream";
 export const maxDuration = 300;
 
 const MAX_CONTINUES = 3;
+const NOTES_BUDGET = 30_000;
+
+/** Newest notes first, up to a character budget. */
+function notesWithinBudget(notes: string[]): string[] {
+  const out: string[] = [];
+  let used = 0;
+  for (const n of notes) { if (used + n.length > NOTES_BUDGET) break; out.push(n); used += n.length; }
+  return out;
+}
 
 export const POST = route("ai.ask", async ({ user, req }) => {
-  const { anchor, draft, turns } = await body(req, z.object({
+  const { anchor, draft, turns, notes } = await body(req, z.object({
     anchor: anchorSchema,
     draft: z.string().max(120_000),
+    notes: z.array(z.string().max(5000)).max(300).default([]),
     turns: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().min(1).max(20_000) })).min(1).max(24),
   }));
   if (turns[turns.length - 1].role !== "user") return Response.json({ error: "That request wasn’t valid." }, { status: 400 });
@@ -34,7 +44,7 @@ export const POST = route("ai.ask", async ({ user, req }) => {
           output_config: { effort: "medium" },
           betas: [FALLBACK_BETA],
           fallbacks: "default",
-          system: askSystemPrompt(anchor, draft),
+          system: askSystemPrompt(anchor, draft, notesWithinBudget(notes)),
           tools: [{ type: "web_search_20260209", name: "web_search", max_uses: 5 }],
           messages,
         }, { signal });
